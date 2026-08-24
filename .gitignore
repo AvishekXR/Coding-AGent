@@ -8,3 +8,4 @@ env/repos/
 *.db-journal
 runs/
 .env
+.env
