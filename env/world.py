@@ -256,6 +256,17 @@ class World:
                                        order_id=order["order_id"], status=422, reason=why)
                     continue
 
+            # Stage 2b -- the node's network. Class E: a package update restarts a daemon
+            # which force-deletes routes another component owns, and a fraction of nodes drop
+            # off the network. Nothing was deployed and no repository changed.
+            if self.host.route_health < 1.0 and (i % 100) >= self.host.route_health * 100:
+                timed_out += 1
+                latencies.append(500)
+                self.telemetry.log(at, "orders-api", "ERROR", "upstream unreachable",
+                                   order_id=order["order_id"], status=504,
+                                   reason="no route to host")
+                continue
+
             # Stage 3 -- downstream dependency over an endpoint read from configuration.
             if self.payments is not None:
                 endpoint = env.get("PAYMENTS_ENDPOINT", "")

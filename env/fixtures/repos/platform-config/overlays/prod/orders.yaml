@@ -8,4 +8,4 @@ data:
   AWS_REGION: us-east-1
   LOG_LEVEL: info
   ORDER_MAX_ITEMS: "50"
-  PAYMENTS_ENDPOINT: https://payments.prod.acme.internal
+  PAYMENTS_ENDPOINT: https://api.payments-provider.example/v2/authorise

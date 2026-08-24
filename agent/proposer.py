@@ -99,6 +99,10 @@ class HeuristicProposer:
     #: Consecutive machine-state answers offered before giving up and seeking provenance.
     MAX_LADDER_RUNGS = 2
 
+    #: Minimum inverse document frequency for a literal to be worth coupling on. Below this
+    #: the literal appears in so many files that it distinguishes nothing.
+    MIN_COUPLING_IDF = 1.2
+
     def __init__(self, tools, ranker=None, failing_entity: str | None = None):
         self.tools = tools
         self.ranker = ranker
@@ -225,6 +229,14 @@ class HeuristicProposer:
             return True
         if (change.get("repo"), change.get("path")) in self._coupled_paths(ctx, anomaly):
             return True
+        if change.get("source") == "package":
+            # A host or OS change sits beneath every service on the fleet, so it can reach any
+            # of them without naming any of them. There is no commit, no deploy and no
+            # mention anywhere in application code -- which is precisely why a ledger built
+            # from version control shows a clean board while tens of thousands of nodes are
+            # off the network. Breadth is correct here; the Residue Rule and the timing check
+            # remain responsible for discarding it when it explains nothing.
+            return True
         if not change.get("repo"):
             # A change with no repository -- a flag flip, a package upgrade, a console action.
             # It cannot be matched by file path because it has none, so ask the reverse index
@@ -256,6 +268,24 @@ class HeuristicProposer:
             candidates.append(tail)
         # Never let the entity's own name do the work.
         candidates = [l for l in candidates if l != entity]
+        if not candidates:
+            return False
+
+        # A service is coupled to whatever its own configuration points at. This is the route
+        # for a provider outage: nothing in the application source names the vendor, but the
+        # endpoint it calls on every request is right there in its configuration, and the
+        # provider's notice names the same host. Without this the correct answer -- "not
+        # ours" -- is unreachable, and the investigation goes hunting for a commit that does
+        # not exist.
+        try:
+            supplied = " ".join(
+                str(v) for v in
+                (self.tools.keys_read_by(entity).get("supplied_values") or {}).values())
+        except Exception:
+            supplied = ""
+        if any(lit in supplied for lit in candidates):
+            return True
+
         for lit in sorted(candidates, key=len, reverse=True)[:6]:
             try:
                 hits = self.tools.who_mentions(lit, limit=40).get("items", [])
@@ -340,13 +370,23 @@ class HeuristicProposer:
             cfgstate = self.tools.keys_read_by(entity)
         except Exception:
             return paths
+        # Only the *discriminating* values. A service's configuration is mostly generic --
+        # a region, a log level, a numeric limit -- and those appear in every file in the
+        # company. Coupling on them links everything to everything, and the nearest recent
+        # change wins on tie-break regardless of whether it has anything to do with the
+        # failure. Inverse document frequency is exactly the right filter and the ranker
+        # already computes it.
+        literals: set[str] = set()
         for value in (cfgstate.get("supplied_values") or {}).values():
-            for lit in extract_literals(str(value)):
-                try:
-                    for m in self.tools.who_mentions(lit, limit=40).get("items", []):
-                        paths.add((m["repo"], m["path"]))
-                except Exception:
-                    continue
+            literals |= extract_literals(str(value))
+        if self.ranker is not None:
+            literals = {l for l in literals if self.ranker.idf(l) >= self.MIN_COUPLING_IDF}
+        for lit in sorted(literals, key=len, reverse=True)[:8]:
+            try:
+                for m in self.tools.who_mentions(lit, limit=40).get("items", []):
+                    paths.add((m["repo"], m["path"]))
+            except Exception:
+                continue
         return paths
 
     # -- the policy ----------------------------------------------------------
@@ -375,7 +415,18 @@ class HeuristicProposer:
             if nxt is not None:
                 return [self._machine_state_claim(nxt)]
 
-        candidates = self._candidate_changes(ctx, target) if target else []
+        # Gather candidates coupled to ANY outstanding anomaly, not only the one the Gate
+        # asked about. The most severe anomaly is frequently the *downstream* one -- a
+        # consumer whose input dried up shows a bigger number than the producer that broke --
+        # and the evidence linking a cause to the failure lives on the upstream side. Asking
+        # only about the loudest signal looks for provenance in the one place it is not.
+        seen_ids: set[str] = set()
+        candidates: list[dict] = []
+        for a in ([target] if target else []) + list(ctx.residue):
+            for c in self._candidate_changes(ctx, a):
+                if c["id"] not in seen_ids:
+                    seen_ids.add(c["id"])
+                    candidates.append(c)
 
         # THE PRUNING RULE (spec 2.3 / 5.6.1). Candidates are eliminated by the residual
         # test, never expanded by curiosity: a candidate that would reduce no residue is
