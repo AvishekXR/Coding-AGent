@@ -1,0 +1,67 @@
+{
+  "incident_id": "001_silent_write_redirect",
+  "status": "resolved",
+  "cause_set": [
+    {
+      "id": "git:platform-config:9f2c1ab",
+      "ts": "2026-08-20T09:34:00",
+      "source": "git",
+      "author": "dee-mensah",
+      "team": "Platform",
+      "repo": "platform-config",
+      "path": "overlays/prod/orders.yaml",
+      "summary": "config: standardise table keys on the _NAME suffix (ORDERS_TABLE -> ORDERS_TABLE_NAME)"
+    },
+    {
+      "id": "iac:platform-iac:4b7e30d",
+      "ts": "2026-08-20T09:12:00",
+      "source": "iac",
+      "author": "dee-mensah",
+      "team": "Platform",
+      "repo": "platform-iac",
+      "path": "modules/iam/dynamodb.tf",
+      "summary": "iam: collapse per-table orders ARNs into one prefix (orders-prod -> orders-*)"
+    }
+  ],
+  "mechanism": "The 09:34 ConfigMap edit renamed the key ORDERS_TABLE to ORDERS_TABLE_NAME in the prod overlay. The 09:35 rollout restarted orders-api pods, which re-read their environment and no longer found ORDERS_TABLE. orders-api fell through to the hardcoded default in app/config.py, DEFAULT_ORDERS_TABLE = 'orders-staging', written during the 2023 bring-up. Before 09:12 that write would have been refused: the IAM policy scoped orders-api to arn:aws:dynamodb:*:*:table/orders-prod, so a PutItem against orders-staging returned AccessDenied and would have paged within minutes. The 09:12 Terraform change widened that resource to arn:aws:dynamodb:*:*:table/orders-* , which permits orders-staging. The write therefore succeeded, returned 201, and produced no error, no latency change and no infrastructure alert. Production orders landed in the staging table until the business metric orders_created was noticed 40 minutes later.",
+  "short_term": "Stop the bleeding by restoring the ORDERS_TABLE key in the prod overlay and rolling out orders-api -- but only after step 1 of the order of operations below. Do not revert the ConfigMap first.",
+  "long_term": "Remove the DEFAULT_ORDERS_TABLE fallback from orders-api/app/config.py so a missing ORDERS_TABLE fails loudly at startup instead of silently selecting another environment's table. Add a startup assertion that the resolved table name matches the deployment's environment. Guard rail for the class: require a consumer-impact check on ConfigMap key renames in platform-config (the reverse index already knows who reads each key), and forbid cross-environment ARN prefixes in shared IAM modules.",
+  "order_of_operations": [
+    "Export every row written to orders-staging since 09:35 to durable storage. The table has a 24h TTL and these are real customer orders.",
+    "Restore the ORDERS_TABLE key in platform-config overlays/prod/orders.yaml and sync.",
+    "Roll out orders-api and verify new writes are landing in orders-prod.",
+    "Re-scope the IAM policy in platform-iac modules/iam/dynamodb.tf from orders-* back to orders-prod.",
+    "Reconcile the exported records into orders-prod, de-duplicating on order_id."
+  ],
+  "rollback_hazard": "orders-staging carries a 24h TTL. Reverting the ConfigMap first, without exporting, redirects new writes correctly but leaves roughly 40 minutes of real customer orders (~4,000 rows) sitting in a table that will expire them permanently. The obvious rollback destroys data. Export before reverting.",
+  "blast_radius": {
+    "direct": [
+      "orders-api -- writing to the wrong destination since 09:35",
+      "analytics-etl -- orders_created down 94%, reporting understated",
+      "orders-staging -- now holds production customer data it was never scoped for"
+    ],
+    "indirect": [
+      "All 14 services consuming the shared IAM module in platform-iac environments/prod/main.tf now hold a widened orders-* grant"
+    ]
+  },
+  "security_implications": "The IAM wildcard remains live after the functional fix. arn:aws:dynamodb:*:*:table/orders-* lets production orders-api credentials read and write any table whose name begins with orders-, including orders-staging and any future orders-* table. No service requires this. It must be re-scoped and filed separately from the incident fix, because correcting the ConfigMap makes the symptom disappear while leaving the over-broad grant in place. Separately: production customer records now sit in a staging table with weaker access controls and should be treated as a data-handling incident.",
+  "confidence": {
+    "value": 0.86,
+    "would_change_my_mind": "Evidence that orders-api was restarted after 09:34 with ORDERS_TABLE present in its environment -- that would break the link between the rename and the fallback. Also: a pre-09:12 authorization log showing a successful write to orders-staging, which would mean the guard rail was never in place and the IAM change is not a cause.",
+    "cheapest_disambiguating_query": "Replay the pre-09:12 IAM policy against a PutItem to orders-staging and confirm it returns AccessDenied. Five seconds, and it separates the two-cause explanation from the one-cause one."
+  },
+  "verification": {
+    "tier": "T1",
+    "passed": true,
+    "command": "replay_check(policy=platform-iac@4b7e30d~1, principal=orders-api, action=dynamodb:PutItem, resource=arn:aws:dynamodb:us-east-1:000000000000:table/orders-staging)",
+    "observed": "AccessDenied: implicit deny, no statement matches. Replaying the post-change policy against the same call returns Allow via arn:aws:dynamodb:*:*:table/orders-*.",
+    "expected": "AccessDenied under the pre-change policy; Allow under the post-change policy"
+  },
+  "owners": [
+    {"scope": "platform-config overlays/prod/orders.yaml", "team": "Platform", "oncall": "dee-mensah", "slack": "#platform-oncall"},
+    {"scope": "platform-iac modules/iam/dynamodb.tf", "team": "Platform", "oncall": "dee-mensah", "slack": "#platform-oncall"},
+    {"scope": "orders-api hardcoded fallback", "team": "Orders", "oncall": "sam-okafor", "slack": "#orders-oncall"},
+    {"scope": "analytics-etl downstream impact", "team": "Data", "oncall": "rin-tanaka", "slack": "#data-oncall"}
+  ],
+  "unexplained": []
+}

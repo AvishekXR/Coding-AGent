@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orders-config
+  namespace: staging
+data:
+  ORDERS_TABLE: orders-staging
+  AWS_REGION: us-east-1
+  LOG_LEVEL: debug
+  ORDER_MAX_ITEMS: "50"

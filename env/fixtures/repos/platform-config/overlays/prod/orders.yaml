@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orders-config
+  namespace: prod
+data:
+  ORDERS_TABLE: orders-prod
+  AWS_REGION: us-east-1
+  LOG_LEVEL: info
+  ORDER_MAX_ITEMS: "50"

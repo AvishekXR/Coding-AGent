@@ -1,0 +1,41 @@
+{
+  "incident_id": "001_silent_write_redirect",
+  "status": "resolved",
+  "_comment": "The halfway root cause. Every statement in it is TRUE, and it is the answer the spec says every surveyed product would emit (section 1.1). It must score 0.00: a machine state has no author, no rollback and no owner to page.",
+  "cause_set": [
+    {
+      "id": "obs:env-missing",
+      "ts": "2026-08-20T09:35:00",
+      "source": "observation",
+      "summary": "ORDERS_TABLE environment variable missing from the orders-api pod environment, so the service is writing to the wrong table"
+    }
+  ],
+  "mechanism": "orders-api is writing to orders-staging instead of orders-prod because the ORDERS_TABLE environment variable is absent from the pod environment and the code fell back to a hardcoded default.",
+  "short_term": "Set ORDERS_TABLE=orders-prod on the orders-api deployment and restart the pods.",
+  "long_term": "Remove the hardcoded default from orders-api so the service fails fast when configuration is missing.",
+  "order_of_operations": [
+    "Set ORDERS_TABLE=orders-prod and restart orders-api."
+  ],
+  "rollback_hazard": "None identified.",
+  "blast_radius": {
+    "direct": ["orders-api", "analytics-etl"],
+    "indirect": []
+  },
+  "security_implications": "None identified.",
+  "confidence": {
+    "value": 0.91,
+    "would_change_my_mind": "Evidence that the environment variable was present.",
+    "cheapest_disambiguating_query": "Dump the orders-api pod environment."
+  },
+  "verification": {
+    "tier": "T0",
+    "passed": true,
+    "command": "kubectl exec deploy/orders-api -- env | grep ORDERS",
+    "observed": "ORDERS_TABLE is not set; ORDERS_TABLE_NAME is present.",
+    "expected": "ORDERS_TABLE=orders-prod"
+  },
+  "owners": [
+    {"scope": "orders-api", "team": "Orders", "oncall": "sam-okafor", "slack": "#orders-oncall"}
+  ],
+  "unexplained": []
+}

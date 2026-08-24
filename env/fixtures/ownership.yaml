@@ -1,0 +1,22 @@
+# pattern -> owning team, on-call rotation and escalation path.
+# Consumed by collectors/ownership.py into the `ownership` table (spec section 6).
+- pattern: orders-api
+  team: Orders
+  oncall: sam-okafor
+  slack: "#orders-oncall"
+  escalation: "orders-lead -> eng-manager-commerce"
+- pattern: analytics-etl
+  team: Data
+  oncall: rin-tanaka
+  slack: "#data-oncall"
+  escalation: "data-lead -> eng-manager-platform"
+- pattern: platform-iac
+  team: Platform
+  oncall: dee-mensah
+  slack: "#platform-oncall"
+  escalation: "platform-lead -> eng-manager-platform"
+- pattern: platform-config
+  team: Platform
+  oncall: dee-mensah
+  slack: "#platform-oncall"
+  escalation: "platform-lead -> eng-manager-platform"
