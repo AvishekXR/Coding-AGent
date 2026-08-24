@@ -230,10 +230,43 @@ class World:
         self.telemetry.metric(at, "orders-api", "dynamodb_writes." + table, accepted)
         self.telemetry.metric(at, "orders-api", "dynamodb_access_denied", denied)
 
+        self._emit_logs(at, table, rng)
+
+    #: Routine line shapes and their share of log volume. Real services emit a handful of
+    #: templates at wildly different rates; a single shape would make the compression ratio
+    #: in the causal brief meaningless.
+    LOG_MIX = (
+        (0.82, "orders-api", "INFO", "order accepted"),
+        (0.10, "orders-api", "INFO", "health check ok"),
+        (0.05, "orders-api", "DEBUG", "cache lookup"),
+        (0.02, "analytics-etl", "INFO", "batch flushed"),
+        (0.01, "orders-api", "WARN", "slow downstream response"),
+    )
+
+    def _emit_logs(self, at: datetime, table: str, rng: random.Random) -> None:
         for i in range(LOG_LINES_PER_MIN):
             ts = at + timedelta(seconds=(60 * i) // LOG_LINES_PER_MIN)
-            self.telemetry.log(
-                ts, "orders-api", "INFO", "order accepted",
-                order_id="ord-{:06d}".format(rng.randrange(10 ** 6)), status=201, table=table,
-                duration_ms=38 + rng.randrange(0, 12),
-            )
+            roll = rng.random()
+            acc = 0.0
+            for share, service, level, msg in self.LOG_MIX:
+                acc += share
+                if roll <= acc:
+                    break
+            fields = {"duration_ms": 38 + rng.randrange(0, 12)}
+            if msg == "order accepted":
+                # `table` is a field *value*, and the compressor drops values. That is not an
+                # oversight: it is why this incident leaves no trace in the logs at all. The
+                # destination changed, every line stayed the same shape, and no new pattern
+                # appears for anyone to notice.
+                fields.update(order_id="ord-{:06d}".format(rng.randrange(10 ** 6)),
+                              status=201, table=table)
+            elif msg == "health check ok":
+                fields.update(endpoint="/healthz", status=200)
+            elif msg == "cache lookup":
+                fields.update(key="sku-{:05d}".format(rng.randrange(10 ** 5)),
+                              hit=rng.random() > 0.2)
+            elif msg == "batch flushed":
+                fields.update(rows=rng.randrange(50, 500))
+            else:
+                fields.update(peer="pricing-api", status=200)
+            self.telemetry.log(ts, service, level, msg, **fields)

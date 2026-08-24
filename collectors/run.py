@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import config as cfg
-from collectors import git_collector, iac_collector, ownership
+from collectors import cluster_collector, git_collector, iac_collector, ownership
 from ledger import index as reverse_index
 from ledger.ledger import Ledger
 from util import parse_ts
@@ -39,6 +39,7 @@ def collect_all(t0: datetime, t1: datetime, ledger: Ledger | None = None) -> dic
 
     n_git = git_collector.collect(ledger, t0, t1, team_of=team_of)
     n_iac = iac_collector.collect(ledger, t0, t1, team_of=team_of)
+    n_cfg = cluster_collector.collect(ledger)
     ledger.commit()
 
     idx = reverse_index.build(ledger)
@@ -57,6 +58,7 @@ def collect_all(t0: datetime, t1: datetime, ledger: Ledger | None = None) -> dic
         "window": [t0.isoformat(), t1.isoformat()],
         "ownership_rows": own,
         "changes": {"git": n_git, "iac": n_iac, "total": n_git + n_iac},
+        "config_state_rows": n_cfg,
         "reverse_index": idx,
     }
     if close_after is not None:
@@ -93,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     print("window        : {} -> {}".format(*summary["window"]))
     print("ownership     : {} patterns".format(summary["ownership_rows"]))
     print("changes       : {} total  (git {}, iac {})".format(c["total"], c["git"], c["iac"]))
+    print("config state  : {} observed keys".format(summary["config_state_rows"]))
     print("reverse index : {} rows over {} literals".format(i["rows"], i["literals"]))
     print("              : {}".format(i["by_kind"]))
     return 0

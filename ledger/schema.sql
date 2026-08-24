@@ -101,3 +101,24 @@ CREATE TABLE IF NOT EXISTS audit_log (
   tokens     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_audit_run ON audit_log(run_id, ts);
+
+-- Observed configuration state, snapshotted from the running cluster by
+-- collectors/cluster_collector.py. This is what makes `why_this_value` (spec 5.4.3) possible
+-- without the tool layer reaching into the environment: the resolution chain is built from
+-- recorded facts plus repository content.
+--
+-- `observed_at` is load-bearing, not bookkeeping. Spec 5.1.2: a live infrastructure view goes
+-- stale almost immediately, so any fact supporting a terminal claim must be re-verified at the
+-- moment of use rather than trusted from cache.
+CREATE TABLE IF NOT EXISTS config_state (
+  kind        TEXT NOT NULL,        -- configmap|secret|deployment_env
+  name        TEXT NOT NULL,
+  namespace   TEXT,
+  key         TEXT NOT NULL,
+  value       TEXT,
+  source_ref  TEXT,                 -- repo:path, or a cluster object reference
+  service     TEXT,                 -- which service this state is projected into
+  observed_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_config_state_key ON config_state(key);
+CREATE INDEX IF NOT EXISTS idx_config_state_svc ON config_state(service, kind);

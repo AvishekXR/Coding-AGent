@@ -80,7 +80,7 @@ def test_solving_half_does_not_read_the_env_world_directly():
     allowed = {"agent/verifier.py", "collectors/iac_collector.py",
                "collectors/k8s_audit_collector.py", "collectors/cloudtrail_collector.py",
                "collectors/ownership.py", "collectors/git_collector.py",
-               "collectors/run.py"}
+               "collectors/run.py", "collectors/cluster_collector.py"}
     offenders = []
     for path in _all_solving_files():
         rel = path.relative_to(cfg.ROOT).as_posix()

@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 import config as cfg
 from ledger.ledger import Ledger
+from tools import resolve
 from tools.bounded import HandleStore, assert_not_raw_logs, bound_list, bound_text, token_cost
 from util import iso, parse_ts
 
@@ -207,6 +208,41 @@ class Tools:
         payload["change_id"] = change_id
         payload["truncated"] = payload.get("truncated", False) or len(lines) > max_lines
         return payload
+
+    # -- 5.4.3 ---------------------------------------------------------------
+    @audited("why_this_value")
+    def why_this_value(self, key: str, service: str, at: str | None = None,
+                       kind: str = "env") -> dict:
+        """Where did this configuration value actually come from, hop by hop?
+
+        The resolution-chain tool. See tools/resolve.py for why this is the tool that cracks
+        the reference incident: it is the only retrieval path here that is *directional*, so
+        it is the only one that can report a hop which was supposed to supply a value and did
+        not. That absence has no audit event and no metric.
+        """
+        out = resolve.build_chain(self.ctx.ledger, self.ctx.repos, key, service)
+        out["at"] = at
+        out["kind"] = kind
+        return out
+
+    @audited("keys_read_by")
+    def keys_read_by(self, service: str) -> dict:
+        """Configuration keys this service's source reads. Used to pick what to ask about."""
+        keys = resolve.keys_read_by(self.ctx.repos, service)
+        rows = self.ctx.ledger.conn.execute(
+            "SELECT DISTINCT key, value FROM config_state WHERE service = ?", (service,)
+        ).fetchall()
+        supplied = {r[0]: r[1] for r in rows}
+        return {
+            "service": service, "keys_read": keys,
+            "keys_supplied": sorted(supplied),
+            # The values name this service's dependencies -- the tables, queues and endpoints
+            # it talks to. A change to whatever file defines one of them can reach this
+            # service without mentioning it.
+            "supplied_values": supplied,
+            # The interesting set: read by code, supplied by nothing.
+            "read_but_not_supplied": sorted(set(keys) - set(supplied)),
+        }
 
     # -- paging --------------------------------------------------------------
     @audited("get_handle")
