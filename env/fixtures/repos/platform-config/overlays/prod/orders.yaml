@@ -8,4 +8,5 @@ data:
   AWS_REGION: us-east-1
   LOG_LEVEL: info
   ORDER_MAX_ITEMS: "50"
+  ORDERS_EVENT_STREAM: orders-queue
   PAYMENTS_ENDPOINT: https://api.payments-provider.example/v2/authorise

@@ -120,6 +120,11 @@ class World:
     payments: Dependency | None = None
     #: orders-api's own validation function, loaded from the repository when it exists.
     _validate: Callable | None = None
+    #: orders-api's own event builder, loaded from the repository when it exists.
+    _build_event: Callable | None = None
+    #: Multiplier on arriving traffic. Class F needs load to grow without anyone changing
+    #: anything: provisioned capacity is a number nobody edited, and traffic grew into it.
+    traffic_multiplier: float = 1.0
 
     @staticmethod
     def open(state_dir: Path | None = None, repos: Path | None = None) -> "World":
@@ -176,6 +181,14 @@ class World:
         )
         self.cluster.rollout("orders-api", at)
         self.cluster.rollout("analytics-etl", at)
+        # The event stream exists in the healthy world, not only in incidents that break it.
+        # A stream that only appears when something goes wrong has no baseline, so its going
+        # silent is undetectable -- and a cascade whose third hop is invisible is graded as a
+        # point answer that happens to be right.
+        if self.queue is None:
+            from env.sim.pipeline import Queue
+
+            self.queue = Queue()
         self._load_service_code()
 
     def _load_service_code(self) -> None:
@@ -189,6 +202,10 @@ class World:
         if vpath.exists():
             mod = _load_module(vpath, "oa_validate")
             self._validate = getattr(mod, "validate_order", None)
+        ppath = self.repos / "orders-api" / "app" / "publish.py"
+        if ppath.exists():
+            mod = _load_module(ppath, "oa_publish")
+            self._build_event = getattr(mod, "build_event", None)
 
     # -- traffic --------------------------------------------------------------
     def run_traffic(self, start: datetime, end: datetime, seed: int = 4471,
@@ -229,15 +246,16 @@ class World:
         failure mode can only host one shape of incident, and passing a range of twelve
         variations on the same shape would mean nothing.
         """
-        accepted = denied = rejected = throttled = declined = timed_out = 0
+        accepted = denied = rejected = throttled = declined = timed_out = published = 0
         latencies: list[int] = []
+        arriving = int(API_ORDERS_PER_MIN * self.traffic_multiplier)
 
         # Stage 1 -- feature flag. Selects a code path; no commit behind it.
         strict = self.flags.values.get("orders.strict_validation", False)
         # Stage 4 -- capacity ceiling. A number nobody edited; traffic grew into it.
-        over = self.capacity.throttled(API_ORDERS_PER_MIN)
+        over = self.capacity.throttled(arriving)
 
-        for i in range(API_ORDERS_PER_MIN):
+        for i in range(arriving):
             n += 1
             order = {"order_id": "ord-{:07d}".format(n),
                      "amount_cents": rng.randrange(500, 40000),
@@ -283,7 +301,7 @@ class World:
                     continue
                 latencies.append(out.latency_ms)
 
-            if i >= API_ORDERS_PER_MIN - over:
+            if i >= arriving - over:
                 throttled += 1
                 latencies.append(900 + rng.randrange(0, 200))
                 self.telemetry.log(at, "orders-api", "WARN", "write throttled",
@@ -309,12 +327,14 @@ class World:
                 continue
 
             # Stage 6 -- publish downstream. A malformed record halts the consumer.
-            malformed = self.queue.is_malformed(order) if self.queue else False
             if self.queue is not None:
-                self.queue.publish(order, malformed=malformed)
+                event = (self._build_event(order) if self._build_event
+                         else dict(order, schema="orders.v1"))
+                self.queue.publish(event, malformed=self.queue.is_malformed(event))
+                published += 1
 
         if self.queue is not None:
-            self.queue.drain(API_ORDERS_PER_MIN)
+            self.queue.drain(arriving)
 
         for _ in range(BATCH_ORDERS_PER_MIN):
             n += 1
@@ -324,6 +344,7 @@ class World:
                  "amount_cents": rng.randrange(500, 40000)}, at)
 
         return {"n": n, "accepted": accepted, "denied": denied, "rejected": rejected,
+                "published": published,
                 "throttled": throttled, "declined": declined, "timed_out": timed_out,
                 "latencies": latencies or [40]}
 
@@ -337,16 +358,17 @@ class World:
         # why the silent redirect is invisible to every infrastructure alert.
         created = self.db.count("orders-prod", since=at) - self.db.count("orders-prod", since=nxt)
         self.telemetry.metric(at, "analytics-etl", "orders_created", created)
-        self.telemetry.metric(at, "orders-api", "http_requests_total", API_ORDERS_PER_MIN)
+        arriving = max(1, int(API_ORDERS_PER_MIN * self.traffic_multiplier))
+        self.telemetry.metric(at, "orders-api", "http_requests_total", arriving)
 
         # Each failure stage has its own response class, so that the classes of spec section 9
         # are distinguishable in telemetry rather than all looking like "errors are up".
         fail_5xx = stats["timed_out"]
         fail_4xx = stats["rejected"] + stats["declined"] + stats["throttled"] + denied
         self.telemetry.metric(at, "orders-api", "http_5xx_rate",
-                              round(fail_5xx / API_ORDERS_PER_MIN, 4))
+                              round(fail_5xx / arriving, 4))
         self.telemetry.metric(at, "orders-api", "http_4xx_rate",
-                              round(fail_4xx / API_ORDERS_PER_MIN, 4))
+                              round(fail_4xx / arriving, 4))
         lat = sorted(stats["latencies"])
         p99 = lat[min(len(lat) - 1, int(len(lat) * 0.99))]
         self.telemetry.metric(at, "orders-api", "latency_p99_ms",
@@ -363,10 +385,17 @@ class World:
                             ("write_throttled", stats["throttled"])):
             if value:
                 self.telemetry.metric(at, "orders-api", name, value)
-        if self.queue is not None and (self.queue.depth or self.queue.poison):
-            self.telemetry.metric(at, "orders-queue", "queue_depth", self.queue.depth)
-            self.telemetry.metric(at, "orders-queue", "poison_records",
-                                  len(self.queue.poison))
+        if self.queue is not None:
+            # Emitted every minute in a healthy world so that silence is a deviation rather
+            # than an absence of evidence.
+            if stats["published"]:
+                self.telemetry.metric(at, "orders-queue", "events_published",
+                                      stats["published"])
+            if self.queue.depth:
+                self.telemetry.metric(at, "orders-queue", "queue_depth", self.queue.depth)
+            if self.queue.poison:
+                self.telemetry.metric(at, "orders-queue", "poison_records",
+                                      len(self.queue.poison))
         if self.host.route_health < 1.0:
             self.telemetry.metric(at, "orders-api", "node_route_health",
                                   round(self.host.route_health, 3))

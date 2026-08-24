@@ -217,6 +217,10 @@ class HeuristicProposer:
             return resolution
         return self._literal_paths(anomaly) | self._dependency_paths(ctx, anomaly.entity)
 
+    @staticmethod
+    def _entity_of(anomaly: Anomaly) -> str:
+        return anomaly.entity
+
     def _couples(self, ctx: ProposalContext, change: dict, anomaly: Anomaly) -> bool:
         """Could this change have produced this anomaly?
 
@@ -229,6 +233,16 @@ class HeuristicProposer:
             return True
         if (change.get("repo"), change.get("path")) in self._coupled_paths(ctx, anomaly):
             return True
+        if change.get("source") == "external":
+            # An external row's `path` is the affected component, and that is a *structured
+            # declaration of scope* rather than an incidental mention. A provider or a
+            # scheduled-event record states what it affects; that is the whole content of the
+            # record. This is why the entity name is admissible here and not in a console
+            # action's free-text summary, where naming a service says nothing about it.
+            comp = str(change.get("path") or "")
+            if comp and (comp == self._entity_of(anomaly) or self._entity_of(anomaly) in comp):
+                return True
+            return self._names_reach_entity(ctx, change, self._entity_of(anomaly))
         if change.get("source") == "package":
             # A host or OS change sits beneath every service on the fleet, so it can reach any
             # of them without naming any of them. There is no commit, no deploy and no

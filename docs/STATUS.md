@@ -9,7 +9,7 @@ Against the build order in specification §11, as of 2026-08-23.
 | 2 | The Gate, rule 1 only + control loop + gate_events | **Done** | `tests/test_acceptance.py` (phase-2 tests) |
 | 3 | The Residue Rule, causal indexer, pruning | **Done** | `tests/test_acceptance.py` (phase-3 tests) |
 | 4 | Verification tiers, decision package, safety layer | **Done** | `tests/test_acceptance.py`, `tests/test_safety.py` |
-| 5 | Range expansion to classes A–L, blind evaluation | **Not started** | — |
+| 5 | Range expansion to classes A–L, blind evaluation | **Partial** | `eval/suite.py`, `tests/test_range.py` |
 
 170 tests pass. All 16 items of the Appendix E checklist that can be verified mechanically
 are verified; a script that re-checks them lives in the commit for phase 4.
@@ -59,21 +59,27 @@ what works is not a report.
    phase-3 comparison in `tests/test_acceptance.py` is evidence that the Residue Rule changes
    the outcome, but it is not the same claim.
 
-3. **One incident, one class.** Incident 001 (class D) is built. §9 asks for at least three
-   incidents per class and at least eight in each of C and D before a blind evaluation. With
-   n=1 there is no basis for any accuracy claim, and by construction the world was authored
-   alongside the solver, which §10.1 names as the largest risk in the project.
+3. **Twelve incidents, one per class.** §9 asks for *at least three per class*, and at least
+   eight each in C and D, before a blind evaluation. One per class is enough to show the
+   machinery handles each shape; it is nowhere near enough for an accuracy number. A single
+   incident per class also means each class is exactly as hard as I made it.
 
-4. **Separated authorship has not happened.** §10.1 requires that one person own incident
-   authoring and never see the agent's internals. Here the same author wrote both. The
-   structural defences are in place — the solving half cannot import `incidents/` or read
-   `truth.yaml`, and 40 tests enforce it — but that constrains *code*, not the author's
-   knowledge. The mitigation is real and partial; it is not the control the spec asks for.
+4. **Separated authorship has not happened, and the held-out split is bookkeeping.**
+   §10.1 requires that one person own incident authoring and never see the agent's internals,
+   and that 30% be held out and never used for debugging. `eval/holdout.yaml` implements the
+   split and `--set holdout` runs it, but every incident in it was authored *and debugged*
+   during this build by the author who wrote the solver. Nothing in it was ever unseen, so a
+   held-out score today measures the same thing as a development score. The file says so, the
+   suite prints the caveat next to the figure, and a test stops the caveat being deleted while
+   the numbers stay. It becomes a real control for incidents added later by someone who has
+   not read `agent/`.
 
-5. **Collectors for k8s audit, CloudTrail, flags, packages and external events** are not
-   built (§11.7). The ledger currently spans git and IaC, which is what incident 001 needs;
-   class E (the Datadog shape, a change that exists in no repository) is unsolvable until the
-   package and OS collectors exist.
+5. **Several coupling rules were added in response to incidents failing.** Each is defensible
+   on its own terms and documented where it lives — evidence precedence, IDF filtering,
+   dependency links, fleet-scoped host changes. But they were written by someone who could see
+   which cases were failing, which is the mechanism §10.1 warns about even when every
+   individual change is principled. The structural defences bound how badly this can go: the
+   solver cannot read an answer key. They do not eliminate it.
 
 6. **External benchmarks not run.** §10.1 requires AIOpsLab, ITBench and OpenRCA for
    calibration before trusting internal numbers. Not attempted.

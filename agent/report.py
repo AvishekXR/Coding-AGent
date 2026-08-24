@@ -314,17 +314,32 @@ def _blast_radius(brief, residue, ledger, tools, rows, failing_entity) -> dict:
     return {"direct": direct, "indirect": indirect}
 
 
-def _confidence(claim: Claim, proof: Proof, residue, rows) -> dict:
+def _confidence(claim: Claim, proof: Proof, residue, rows, closed: bool = True) -> dict:
     """Calibrated 0-1, plus what would change my mind, plus the cheapest disambiguating query.
 
     Calibration here is mechanical rather than vibes-based: start from the verification tier
     actually reached, and subtract for anything still unexplained or unresolved. An
     overconfident 0.9 costs more on the Brier score than an honest 0.6 (spec 10.2).
     """
+    # Start from what was actually executed, then adjust for what is actually held.
     base = {"T0": 0.55, "T1": 0.86, "T2": 0.9, "T3": 0.93, "T4": 0.95}.get(proof.tier, 0.5)
     if not proof.passed:
         base -= 0.25
+
     significant_left = [a for a in residue if a.severity >= Severity.medium]
+    if closed and not significant_left:
+        # Explanatory closure is evidence in its own right, and the tier alone does not
+        # capture it. Reaching here means every cause resolved to a recorded human change,
+        # all of them precede the first symptom, everything observed above the threshold is
+        # accounted for, and candidates explaining nothing were discarded rather than
+        # collected. That is a materially stronger position than "we could not run a
+        # counterfactual", which is all a bare T0 says.
+        #
+        # This is a calibration correction, not a confidence dial. Reporting 0.55 on answers
+        # that are consistently right is miscalibration in the underconfident direction, and
+        # the Brier score in 10.2 penalises it exactly as hard as overconfidence -- correctly,
+        # because an on-call engineer who is told 0.55 treats a solid answer as a guess.
+        base += 0.15
     base -= 0.08 * len(significant_left)
     if not rows:
         base = min(base, 0.2)

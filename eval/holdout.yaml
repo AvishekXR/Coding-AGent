@@ -1,0 +1,40 @@
+# Held-out split. Spec section 10.1.
+#
+#   "Thirty percent of incidents are held out and only run at phase gates. Held-out incidents
+#    are never used for debugging."
+#
+# FROZEN: 2026-08-23. Moving an incident between sets requires a commit whose message states
+# why, in the same way the rubric does.
+#
+# ---------------------------------------------------------------------------------------
+# HONESTY NOTE -- read before quoting any held-out number.
+#
+# Every incident below was authored AND debugged during the same build, by the same author who
+# wrote the solver. The split is real and the mechanism works, but for this set it is
+# bookkeeping rather than a control: nothing here was ever unseen. A held-out score computed
+# today measures the same thing as a development score.
+#
+# The split becomes meaningful for incidents added *after* this line, by someone who has not
+# read agent/. Until then `eval/suite.py` prints this caveat next to the held-out figure, and
+# it should keep doing so.
+# ---------------------------------------------------------------------------------------
+
+version: 1
+
+# 4 of 12 -- one third, spread across classes rather than clustered, so the held-out set is
+# not accidentally all easy or all hard.
+holdout:
+  - 003_flag_flip_strict_validation      # B -- non-repo cause
+  - 006_write_capacity_saturation        # F -- no cause at all
+  - 009_innocent_codeploy                # J -- red herrings
+  - 010_cascade_three_hops               # I -- multi-hop
+
+development:
+  - 001_silent_write_redirect            # D -- the reference incident
+  - 002_validation_tightened             # A
+  - 004_staging_endpoint_in_shared_config  # C
+  - 005_os_package_route_flush           # E
+  - 007_vendor_degradation               # G
+  - 008_poison_record_schema_rename      # H
+  - 011_null_incident                    # K
+  - 012_log_injection                    # L

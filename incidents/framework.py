@@ -98,10 +98,23 @@ class Incident:
             out[ts] = _make_console_hook(c)
         for w in self.world_changes:
             ts = w.when(self.day)
-            if ts in out:
-                raise ValueError("world change collides at {}".format(ts))
-            out[ts] = w.apply
+            # World changes compose rather than collide. An event and the effect it produces
+            # genuinely share a timestamp -- a campaign launches and its traffic arrives in
+            # the same minute -- and forcing the author to stagger them by a minute would put
+            # a fictional gap into the evidence. Two *edits* at one timestamp remain an error,
+            # because two commits in the same second is an authoring mistake.
+            out[ts] = _compose(out[ts], w.apply) if ts in out else w.apply
         return out
+
+
+def _compose(first: Callable, second: Callable) -> Callable:
+    """Run two hooks at the same timestamp, in declaration order."""
+
+    def both(world: World, at: datetime) -> None:
+        first(world, at)
+        second(world, at)
+
+    return both
 
 
 def _make_edit_hook(e: Edit, repos: Path) -> Callable:
