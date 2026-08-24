@@ -50,12 +50,23 @@ def _named(run):
 
 
 # --- phase 2 (spec 11.4) -----------------------------------------------------
+#: Sources that record a human-authored change with no repository behind it: a console
+#: action, a flag flip, a package upgrade, a documented external event. These are real causes
+#: -- whole incident classes have no commit anywhere -- so "has provenance" cannot mean "has
+#: a repo". This mirrors the grader's depth check rather than restating it loosely.
+NON_REPO_SOURCES = {"k8s", "cloudtrail", "flag", "package", "external"}
+
+
+def _has_provenance(cause: dict) -> bool:
+    return bool(cause.get("repo")) or cause.get("source") in NON_REPO_SOURCES
+
+
 def test_phase2_no_longer_terminates_on_machine_state(rule1_only_run):
     """Spec 11.4 acceptance: zero high-confidence machine-state terminations."""
     run = rule1_only_run
     assert run.terminated_as == "accepted"
     for c in run.package.cause_set:
-        assert c.get("repo"), "terminated on something with no repository: {}".format(c)
+        assert _has_provenance(c),             "terminated on something with no human author: {}".format(c)
 
 
 def test_phase2_produces_the_first_two_rejections_of_the_reference_trace(rule1_only_run):

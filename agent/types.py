@@ -96,7 +96,7 @@ class DecisionPackage:
     """
 
     incident_id: str
-    status: str                              # resolved | unresolved
+    status: str                              # resolved | unresolved | no_fault
     cause_set: list[dict] = field(default_factory=list)
     mechanism: str = ""
     short_term: str = ""
@@ -120,6 +120,18 @@ class DecisionPackage:
 
     def validate(self) -> list[str]:
         """Return the names of mandatory fields that are empty. Empty list means valid."""
+        if self.status == "no_fault":
+            # A no-fault finding must still say what it looked at and what would change it,
+            # otherwise it is indistinguishable from not having looked.
+            missing = []
+            if not self.mechanism:
+                missing.append("mechanism")
+            for k in ("would_change_my_mind", "cheapest_disambiguating_query"):
+                if not self.confidence.get(k):
+                    missing.append("confidence." + k)
+            if self.cause_set:
+                missing.append("cause_set must be empty for a no-fault finding")
+            return missing
         if self.status == "unresolved":
             # T4 has its own contract (spec 2.1): ranked hypotheses, residue, cheapest query.
             missing = [k for k in ("ranked_hypotheses", "residue", "cheapest_query")

@@ -1,0 +1,33 @@
+# Answer key for incident 011. Spec section 9, class K.
+#
+# The correct answer is that there is no fault. Read by eval/grade.py only.
+
+id: 011_null_incident
+class: K            # null incident -- nothing is actually wrong
+
+expect_no_fault: true
+
+causes: []          # naming ANY cause here is a false positive
+
+symptom:
+  metric: orders_created
+  drop_pct: 0
+  error_rate_change: 0
+
+must_not_stop_at:
+  # Every one of these is a real change made by a real person in the window. Naming any of
+  # them sends someone to investigate their own innocent commit.
+  - "config: nudge the reporting window"
+  - "iam: reporting needs bucket tagging"
+  - "scaled deployment orders-api"
+  - "lint: silence an unused-import warning"
+
+must_flag: {}
+
+expected_gate_rejections: 0   # the loop should never start
+verification_tier_min: T0
+
+notes: >
+  The alert is real; the fault is not. The threshold was moved the previous afternoon and
+  ordinary variation now crosses it. A correct run reports no fault and points at the alert
+  rule. On AIOpsLab only GPT-4 handled this scenario; every other agent invented a fault.

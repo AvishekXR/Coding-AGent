@@ -136,8 +136,9 @@ CONSOLE = [
 
 
 def build() -> Incident:
-    edits = [CAUSE_IAM, CAUSE_CONFIG, ROLLOUT] + RED_HERRINGS
-    return Incident("001_silent_write_redirect", DAY, edits, CONSOLE)
+    edits = [CAUSE_IAM, CAUSE_CONFIG] + RED_HERRINGS
+    return Incident("001_silent_write_redirect", DAY, edits, CONSOLE,
+                    world_changes=[ROLLOUT])
 
 
 META = {

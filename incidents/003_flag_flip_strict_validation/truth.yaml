@@ -1,0 +1,36 @@
+# Answer key. Read by eval/grade.py only.
+
+id: 003_flag_flip_strict_validation
+class: B            # same-service configuration / feature-flag change
+
+causes:
+  - repo: null
+    source: flag
+    path: flags/orders.strict_validation
+    ts: "2026-08-20T09:18:00"
+    change: orders.strict_validation enabled in prod
+    team: Orders
+
+symptom:
+  metric: http_4xx_rate
+  drop_pct: 50
+  error_rate_change: 50
+
+must_not_stop_at:
+  - "strict validation is enabled"
+  - "the v2 rules are rejecting orders"
+  - "orders exceed the per-order limit"
+  # The trap for a git-only ledger: an innocent docstring commit to the very file whose
+  # rules are firing, in the failing service, forty minutes before the symptom.
+  - "docs: reference the validation RFC"
+
+must_flag:
+  ordering: false
+
+min_gate_rejections: 1
+verification_tier_min: T0
+
+notes: >
+  There is no commit. The code behind the flag was merged weeks ago and is unchanged. A change
+  ledger built from version control alone reports "no changes found" while half of production
+  is being refused. This class exists to make that failure mode visible rather than latent.

@@ -27,3 +27,10 @@ def resolve_table_name(env=None):
 def resolve_region(env=None):
     env = os.environ if env is None else env
     return env.get("AWS_REGION", DEFAULT_REGION)
+
+
+def resolve_payments_endpoint(env=None):
+    """Where to send payment authorisation. Supplied by the shared ConfigMap; there is
+    deliberately no default, because guessing a payments endpoint is worse than failing."""
+    env = os.environ if env is None else env
+    return env.get("PAYMENTS_ENDPOINT", "")

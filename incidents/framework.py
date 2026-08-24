@@ -69,11 +69,18 @@ class Incident:
     """Applies a set of edits to a seeded world while traffic runs through it."""
 
     def __init__(self, incident_id: str, day: str, edits: list[Edit],
-                 console: list[ConsoleAction] | None = None):
+                 console: list[ConsoleAction] | None = None,
+                 world_changes: list | None = None,
+                 setup: Callable | None = None):
         self.id = incident_id
         self.day = day
         self.edits = edits
         self.console = console or []
+        #: Flag flips, package upgrades, external events, capacity limits, raw mutations.
+        self.world_changes = world_changes or []
+        #: Run once before traffic starts -- for shaping the world the incident needs (a
+        #: dependency endpoint table, a queue predicate) rather than for breaking it.
+        self.setup = setup
 
     # -- hook construction ----------------------------------------------------
     def hooks(self, repos: Path) -> dict[datetime, Callable]:
@@ -89,6 +96,11 @@ class Incident:
             if ts in out:
                 raise ValueError("console action collides with an edit at {}".format(ts))
             out[ts] = _make_console_hook(c)
+        for w in self.world_changes:
+            ts = w.when(self.day)
+            if ts in out:
+                raise ValueError("world change collides at {}".format(ts))
+            out[ts] = w.apply
         return out
 
 
@@ -119,6 +131,11 @@ def _make_edit_hook(e: Edit, repos: Path) -> Callable:
                 )
         elif e.effect == "rollout":
             world.cluster.rollout(e.rollout or "orders-api", at)
+            # A rollout replaces the running process, so the new code takes effect here and
+            # not at the commit. Without this reload a code change would be visible in git
+            # and invisible in behaviour -- which is the one thing a simulated world must
+            # never get wrong, because the whole point is that the incident is emergent.
+            world._load_service_code()
 
     return apply
 
@@ -141,16 +158,158 @@ def _make_console_hook(c: ConsoleAction) -> Callable:
     return apply
 
 
-def rollout_only(ts: str, deployment: str, note: str) -> Edit:
-    """A pod restart with no file edit behind it.
+@dataclass
+class Rollout:
+    """A pod restart. Not a commit, and deliberately not modelled as one.
 
-    Modelled as a comment-only commit in platform-config so that the rollout has a real
-    timestamp in the audit stream; the edit itself is inert.
+    An earlier version of this helper faked a rollout with a comment-only commit that named
+    the deployment in `platform-config/README.md`. That put the service's name into a file in
+    another team's repository, the reverse index dutifully linked the two, and the agent began
+    attributing the service's anomalies to a README.
+
+    The lesson generalises beyond this bug: an authoring convenience that writes into indexed
+    content is not neutral. It invents a relationship the real world does not have, and the
+    solver has no way to tell scaffolding from evidence. Test-harness artefacts must stay out
+    of anything the agent can read.
+
+    A real rollout leaves a Kubernetes audit event and nothing else. So does this one.
     """
-    return Edit(
-        ts=ts, repo="platform-config", path="README.md",
-        old="**On-call:** #platform-oncall",
-        new="**On-call:** #platform-oncall\n\n<!-- {} -->".format(note),
-        message=note, author="system-config-sync <sync@acme.example>", team="Platform",
-        effect="rollout", rollout=deployment,
-    )
+
+    ts: str
+    deployment: str = "orders-api"
+    note: str = "rollout"
+
+    def when(self, day: str) -> datetime:
+        return datetime.fromisoformat("{}T{}:00".format(day, self.ts))
+
+    def apply(self, world: World, at: datetime) -> None:
+        world.cluster.rollout(self.deployment, at)
+        # The new process starts here, so this is where new code takes effect -- not at the
+        # commit. Without the reload a code change is visible in git and invisible in
+        # behaviour, and the incident stops being emergent.
+        world._load_service_code()
+
+
+def rollout_only(ts: str, deployment: str, note: str) -> "Rollout":
+    """Constructor kept for the incidents that already call it by this name."""
+    return Rollout(ts=ts, deployment=deployment, note=note)
+
+
+# --- changes that exist outside any repository -------------------------------
+@dataclass
+class FlagFlip:
+    """A feature-flag toggle. Class B.
+
+    No commit, no pull request, no review. The fastest way to change production behaviour,
+    and therefore disproportionately likely to be the answer.
+    """
+
+    ts: str
+    flag: str
+    to: bool
+    actor: str
+    team: str
+    scope: str = "prod"
+
+    def when(self, day: str) -> datetime:
+        return datetime.fromisoformat("{}T{}:00".format(day, self.ts))
+
+    def apply(self, world: World, at: datetime) -> None:
+        world.flags.set(at, self.flag, self.to, self.actor, self.team, self.scope)
+
+
+@dataclass
+class PackageUpgrade:
+    """An OS or package update. Class E -- the change that lives in no repository.
+
+    `route_health` reproduces the Datadog shape: the update restarts a daemon which
+    force-deletes routes another component owns, and nodes drop off the network. There is no
+    commit to find and no deploy to correlate against.
+    """
+
+    ts: str
+    package: str
+    to_version: str
+    channel: str
+    scope: str = "fleet"
+    actor: str = "unattended-upgrades"
+    team: str = "Platform"
+    route_health: float | None = None
+
+    def when(self, day: str) -> datetime:
+        return datetime.fromisoformat("{}T{}:00".format(day, self.ts))
+
+    def apply(self, world: World, at: datetime) -> None:
+        world.host.record(at, self.package, self.to_version, self.channel,
+                          self.scope, self.actor, self.team)
+        if self.route_health is not None:
+            world.host.route_health = self.route_health
+
+
+@dataclass
+class ExternalEvent:
+    """A documented event outside the organisation's control. Class G.
+
+    `status` decides whether the collector marks the row evidenced. A status page saying
+    "investigating" is a report of an event, not a confirmation of one, and the Gate refuses
+    to terminate on an unevidenced row -- which is correct during the first twenty minutes of
+    an incident, when a status page is the least reliable source in the building.
+    """
+
+    ts: str
+    provider: str
+    component: str
+    title: str
+    status: str = "investigating"
+    url: str = ""
+
+    def when(self, day: str) -> datetime:
+        return datetime.fromisoformat("{}T{}:00".format(day, self.ts))
+
+    def apply(self, world: World, at: datetime) -> None:
+        world.external.record(at, self.provider, self.component, self.title,
+                              self.status, self.url)
+
+
+@dataclass
+class CapacityChange:
+    """A throughput ceiling being reached. Class F -- saturation with no change at all.
+
+    Nobody edits anything here. The ceiling was always there; traffic grew into it. Modelled
+    as a world fact rather than a ledger row precisely so that the ledger has nothing to
+    offer, and an agent that assumes every incident has a culprit commit has to manufacture
+    one or admit there is none.
+    """
+
+    ts: str
+    writes_per_minute: int | None
+
+    def when(self, day: str) -> datetime:
+        return datetime.fromisoformat("{}T{}:00".format(day, self.ts))
+
+    def apply(self, world: World, at: datetime) -> None:
+        world.capacity.writes_per_minute = self.writes_per_minute
+
+
+@dataclass
+class WorldMutation:
+    """An arbitrary switch thrown in the world at a timestamp.
+
+    The escape hatch for incidents whose mechanism does not fit the shapes above -- a queue
+    predicate, a dependency endpoint table. Deliberately last: if a mutation shape recurs, it
+    should become a named class so an incident author is not writing simulator internals.
+    """
+
+    ts: str
+    fn: Callable
+    note: str = ""
+
+    def when(self, day: str) -> datetime:
+        return datetime.fromisoformat("{}T{}:00".format(day, self.ts))
+
+    def apply(self, world: World, at: datetime) -> None:
+        self.fn(world, at)
+
+
+#: Everything an incident can schedule that is not a file edit.
+NON_REPO_CHANGES = (FlagFlip, PackageUpgrade, ExternalEvent, CapacityChange, WorldMutation)

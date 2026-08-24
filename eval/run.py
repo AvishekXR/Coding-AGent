@@ -88,6 +88,29 @@ def render_package(pkg) -> str:
     return "\n".join(out)
 
 
+def render_no_fault(pkg) -> str:
+    """Class K has its own rendering. Labelling it UNRESOLVED would misrepresent it as a
+    failed investigation when it is a positive finding: there is nothing here."""
+    out = ["NO FAULT FOUND  (spec section 9, class K)", ""]
+    for line in _wrap(pkg.mechanism):
+        out.append("  " + line)
+    if pkg.unexplained:
+        out += ["", "OBSERVED BUT BELOW THRESHOLD  (ordinary variation, not an incident)"]
+        for u in pkg.unexplained:
+            out.append("  {:<9} {:<15} {:<32} {}".format(
+                u["severity"], u["entity"], u["kind"], u["magnitude"]))
+    else:
+        out += ["", "No anomaly of any severity was detected in the window."]
+    c = pkg.confidence
+    out += ["", "WHAT WOULD CHANGE THIS"]
+    for line in _wrap(c.get("would_change_my_mind", "")):
+        out.append("  " + line)
+    out += ["", "NEXT STEP"]
+    for line in _wrap(c.get("cheapest_disambiguating_query", "")):
+        out.append("  " + line)
+    return "\n".join(out)
+
+
 def render_frontier(pkg) -> str:
     f = pkg.frontier
     out = ["UNRESOLVED  (spec 2.1 T4 -- the honest exit)", "",
@@ -147,7 +170,12 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print("-" * 98)
     print()
-    print(render_package(pkg) if pkg.status == "resolved" else render_frontier(pkg))
+    if pkg.status == "resolved":
+        print(render_package(pkg))
+    elif pkg.status == "no_fault":
+        print(render_no_fault(pkg))
+    else:
+        print(render_frontier(pkg))
     print()
     print("-" * 98)
     print()

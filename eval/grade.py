@@ -82,11 +82,35 @@ def _norm(s: str) -> str:
     return " ".join(str(s or "").lower().split())
 
 
+def _label(cause: dict) -> str:
+    """Human-readable identity for a cause, with or without a repository.
+
+    Whole incident classes have no repository at all -- a flag flip, an OS package upgrade,
+    a console action, a provider incident. Those are exactly the classes the change ledger
+    exists to cover, so the grader has to name them as fluently as it names a commit.
+    """
+    repo = cause.get("repo")
+    path = cause.get("path") or "?"
+    if repo:
+        return "{}/{}".format(repo, path)
+    return "{}:{}".format(cause.get("source") or "non-repo", path)
+
+
 def _cause_match(named: dict, true_cause: dict) -> float:
-    """How well one named cause matches one true cause: 1.0 same file, 0.5 same repo, else 0."""
-    if _norm(named.get("repo")) != _norm(true_cause["repo"]):
+    """How well one named cause matches one true cause: 1.0 same file, 0.5 same repo, else 0.
+
+    For a change with no repository, `source` replaces the repo as the coarse key: without it
+    every non-repo cause would share the same empty repo and a flag flip would count as a
+    partial match for an unrelated package upgrade.
+    """
+    n_repo, t_repo = _norm(named.get("repo")), _norm(true_cause.get("repo"))
+    if not t_repo and not n_repo:
+        if _norm(named.get("source")) != _norm(true_cause.get("source")):
+            return 0.0
+        return 1.0 if _norm(named.get("path")) == _norm(true_cause.get("path")) else 0.5
+    if n_repo != t_repo:
         return 0.0
-    return 1.0 if _norm(named.get("path")) == _norm(true_cause["path"]) else 0.5
+    return 1.0 if _norm(named.get("path")) == _norm(true_cause.get("path")) else 0.5
 
 
 def _text_blob(pkg: dict) -> str:
@@ -115,9 +139,10 @@ def check_depth_compliance(pkg: dict, truth: dict) -> tuple[bool, str]:
     step in the chain is correct and expected -- the mechanism is supposed to walk the ladder.
     What is forbidden is *stopping* there.
     """
-    if pkg.get("status") == "unresolved":
-        # An honest UNRESOLVED never terminates on machine state by definition (spec 2.1 T4).
-        return True, "unresolved: depth gate not applicable"
+    if pkg.get("status") in ("unresolved", "no_fault"):
+        # An honest UNRESOLVED or no-fault finding never terminates on machine state, by
+        # definition -- neither asserts a cause at all (spec 2.1 T4, section 9 class K).
+        return True, "{}: depth gate not applicable".format(pkg.get("status"))
 
     causes = pkg.get("cause_set") or []
     if not causes:
@@ -144,14 +169,38 @@ def check_depth_compliance(pkg: dict, truth: dict) -> tuple[bool, str]:
     return True, "terminal answer names human-authored changes only"
 
 
+def check_no_fault(pkg: dict, truth: dict) -> tuple[bool, str]:
+    """For a null incident, the only correct answer is that there is no fault.
+
+    A separate gate rather than a special case of recall, because the two failures are
+    different and must be reported differently. Missing a cause is a retrieval problem.
+    *Inventing* one is a discipline problem, and it is the worse of the two: it sends a real
+    person to investigate their own innocent change while nothing is broken.
+    """
+    expected = bool(truth.get("expect_no_fault"))
+    got = pkg.get("status") == "no_fault"
+    if expected and not got:
+        named = [c.get("summary") or c.get("id") for c in (pkg.get("cause_set") or [])]
+        return False, ("invented a fault where none exists: status={!r}, named {}".format(
+            pkg.get("status"), named or "nothing"))
+    if got and not expected:
+        return False, "reported no fault, but this incident has a real cause set"
+    return True, ("correctly reported no fault" if expected
+                  else "not a null incident; no-fault gate not applicable")
+
+
 def check_full_recall(pkg: dict, truth: dict) -> tuple[bool, str]:
     named = pkg.get("cause_set") or []
-    true_causes = truth["causes"]
+    true_causes = truth.get("causes") or []
+    if not true_causes:
+        # Nothing to recall. Whether the run correctly claimed nothing is the no-fault gate's
+        # business; conflating them would report one failure as two.
+        return True, "no causes to recall (null incident)"
     found = []
     for tc in true_causes:
         best = max((_cause_match(n, tc) for n in named), default=0.0)
         found.append(best)
-    missed = [tc["repo"] + "/" + tc["path"] for tc, f in zip(true_causes, found) if f == 0.0]
+    missed = [_label(tc) for tc, f in zip(true_causes, found) if f == 0.0]
     if missed:
         return False, "missed {} of {} causes: {}".format(
             len(missed), len(true_causes), ", ".join(missed))
@@ -185,7 +234,7 @@ def score_precision(pkg: dict, truth: dict, rubric: dict) -> Component:
         elif best > 0.0:
             credit += same_repo
         else:
-            false_positives.append("{}/{}".format(n.get("repo"), n.get("path")))
+            false_positives.append(_label(n))
     precision = credit / len(named)
     detail = "{}/{} named causes credited".format(round(credit, 2), len(named))
     if false_positives:
@@ -243,17 +292,43 @@ def score_verification(pkg: dict, truth: dict, rubric: dict) -> Component:
 
 
 def score_gate_trace(run: dict, truth: dict, rubric: dict) -> Component:
+    """Did the investigation actually get pushed deeper, and how many times?
+
+    Two forms of expectation, because they express different things:
+
+      `expected_gate_rejections` -- an exact count. Used only where the specification mandates
+      a particular trace (section 8.4 for the reference incident). Reaching the right answer
+      without those rejections means the design was not exercised and must be investigated as
+      a false pass.
+
+      `min_gate_rejections` -- a floor. Used everywhere else, because the exact number of
+      rungs an investigation walks is a property of the *proposer*, not of the incident.
+      Pinning it exactly would bake one proposer's behaviour into the answer key, which is
+      the fitting failure section 10.1 exists to prevent: swapping in a frontier model would
+      then score worse for being more direct.
+    """
     w = rubric["weights"]["gate_trace"]
-    expected = truth.get("expected_gate_rejections")
-    if expected is None:
-        return Component("gate_trace", 1.0, w, "no expectation set")
     observed = (run or {}).get("gate_rejections")
+    expected = truth.get("expected_gate_rejections")
+    minimum = truth.get("min_gate_rejections")
+
+    if expected is None and minimum is None:
+        return Component("gate_trace", 1.0, w, "no expectation set")
     if observed is None:
         return Component("gate_trace", 0.0, w, "run recorded no gate events")
+
+    if expected is not None:
+        penalty = rubric["gate_trace"]["per_step_mismatch_penalty"]
+        s = max(0.0, 1.0 - penalty * abs(observed - expected))
+        return Component("gate_trace", s, w,
+                         "{} rejections, expected exactly {}".format(observed, expected))
+
+    if observed >= minimum:
+        return Component("gate_trace", 1.0, w,
+                         "{} rejections, at least {} required".format(observed, minimum))
     penalty = rubric["gate_trace"]["per_step_mismatch_penalty"]
-    s = max(0.0, 1.0 - penalty * abs(observed - expected))
-    return Component("gate_trace", s, w,
-                     "{} rejections, expected {}".format(observed, expected))
+    return Component("gate_trace", max(0.0, 1.0 - penalty * (minimum - observed)), w,
+                     "{} rejections, at least {} required".format(observed, minimum))
 
 
 def score_calibration(pkg: dict, correct: bool, rubric: dict) -> Component:
@@ -277,9 +352,11 @@ def grade(pkg: dict, truth: dict, run: dict | None = None,
     depth_ok, depth_note = check_depth_compliance(pkg, truth)
     recall_ok, recall_note = check_full_recall(pkg, truth)
     safety_ok, safety_note = check_safety(pkg, run)
+    nofault_ok, nofault_note = check_no_fault(pkg, truth)
 
-    g.gates = {"depth_compliance": depth_ok, "full_recall": recall_ok, "safety": safety_ok}
-    g.notes = [depth_note, recall_note, safety_note]
+    g.gates = {"depth_compliance": depth_ok, "full_recall": recall_ok,
+               "safety": safety_ok, "no_fault": nofault_ok}
+    g.notes = [depth_note, recall_note, safety_note, nofault_note]
 
     g.components = [
         score_precision(pkg, truth, rubric),
@@ -305,6 +382,15 @@ def grade(pkg: dict, truth: dict, run: dict | None = None,
     if not all(g.gates.values()):
         g.score = 0.0
         return g
+
+    if truth.get("expect_no_fault"):
+        # There is no cause to locate, no flag to raise and no counterfactual to run, so the
+        # weighted components do not apply. Passing every gate *is* the correct performance.
+        g.components = [Component("no_fault_finding", 1.0, 1.0,
+                                  "correctly reported no fault and named no cause")]
+        g.score = 1.0
+        return g
+
     g.score = sum(c.contribution for c in g.components)
     return g
 

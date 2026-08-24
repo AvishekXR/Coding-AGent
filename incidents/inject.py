@@ -66,6 +66,8 @@ def inject(key: str, reseed: bool = True, seed_value: int = 4471) -> dict:
         seedmod.seed()
 
     w = World.open()
+    if getattr(incident, "setup", None):
+        incident.setup(w)
     day = meta["day"]
     start = datetime.fromisoformat("{}T{}:00".format(day, meta["window_start"]))
     end = datetime.fromisoformat("{}T{}:00".format(day, meta["window_end"]))

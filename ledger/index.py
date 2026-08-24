@@ -33,11 +33,18 @@ PATTERNS = {
     "resource": re.compile(r"\b[a-z][a-z0-9]*(?:-[a-z0-9]+)+\b"),
     # api.internal.acme.example
     "host": re.compile(r"\b[a-z0-9-]+(?:\.[a-z0-9-]+){2,}\b"),
+    # orders.strict_validation, billing.new_pricing -- feature-flag keys and dotted settings.
+    # Spec 5.2 lists flag keys among the literals this index must cover. A flag is one of the
+    # very few things that can change production behaviour with no commit anywhere, so the
+    # ledger's flag history is often the only record of the cause -- and it has nothing to
+    # attach to unless the index can resolve the key back to the code that reads it.
+    "dotted_key": re.compile(r"\b[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]+)+\b"),
 }
 
 #: Combined pattern handed to ripgrep to pull candidate lines out of the tree.
 _RG_PATTERN = "|".join(
-    ["[A-Z][A-Z0-9]*(_[A-Z0-9]+)+", "arn:[a-z0-9-]*:", "[a-z][a-z0-9]*(-[a-z0-9]+)+"]
+    ["[A-Z][A-Z0-9]*(_[A-Z0-9]+)+", "arn:[a-z0-9-]*:", "[a-z][a-z0-9]*(-[a-z0-9]+)+",
+     r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]+)+"]
 )
 
 KIND_BY_SUFFIX = {

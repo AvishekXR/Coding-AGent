@@ -15,7 +15,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import config as cfg
-from collectors import cluster_collector, git_collector, iac_collector, ownership
+from collectors import (
+    cloudtrail_collector, cluster_collector, external_collector, flag_collector,
+    git_collector, iac_collector, k8s_audit_collector, ownership, package_collector,
+)
 from ledger import index as reverse_index
 from ledger.ledger import Ledger
 from util import parse_ts
@@ -37,8 +40,17 @@ def collect_all(t0: datetime, t1: datetime, ledger: Ledger | None = None) -> dic
     own = ownership.collect(ledger)
     team_of = ownership.team_lookup(ledger)
 
-    n_git = git_collector.collect(ledger, t0, t1, team_of=team_of)
-    n_iac = iac_collector.collect(ledger, t0, t1, team_of=team_of)
+    # All seven change sources of spec 5.1.1. An incident class is unsolvable if its change
+    # source is missing from the ledger, so the set is fixed here rather than per incident.
+    counts = {
+        "git": git_collector.collect(ledger, t0, t1, team_of=team_of),
+        "iac": iac_collector.collect(ledger, t0, t1, team_of=team_of),
+        "k8s": k8s_audit_collector.collect(ledger, t0, t1, team_of=team_of),
+        "cloudtrail": cloudtrail_collector.collect(ledger, t0, t1, team_of=team_of),
+        "flag": flag_collector.collect(ledger, t0, t1, team_of=team_of),
+        "package": package_collector.collect(ledger, t0, t1, team_of=team_of),
+        "external": external_collector.collect(ledger, t0, t1, team_of=team_of),
+    }
     n_cfg = cluster_collector.collect(ledger)
     ledger.commit()
 
@@ -57,7 +69,7 @@ def collect_all(t0: datetime, t1: datetime, ledger: Ledger | None = None) -> dic
     summary = {
         "window": [t0.isoformat(), t1.isoformat()],
         "ownership_rows": own,
-        "changes": {"git": n_git, "iac": n_iac, "total": n_git + n_iac},
+        "changes": dict(counts, total=sum(counts.values())),
         "config_state_rows": n_cfg,
         "reverse_index": idx,
     }
@@ -94,7 +106,10 @@ def main(argv: list[str] | None = None) -> int:
     i = summary["reverse_index"]
     print("window        : {} -> {}".format(*summary["window"]))
     print("ownership     : {} patterns".format(summary["ownership_rows"]))
-    print("changes       : {} total  (git {}, iac {})".format(c["total"], c["git"], c["iac"]))
+    print("changes       : {} total".format(c["total"]))
+    print("              : {}".format(
+        ", ".join("{} {}".format(k, v) for k, v in sorted(c.items())
+                  if k != "total" and v)))
     print("config state  : {} observed keys".format(summary["config_state_rows"]))
     print("reverse index : {} rows over {} literals".format(i["rows"], i["literals"]))
     print("              : {}".format(i["by_kind"]))

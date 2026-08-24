@@ -52,7 +52,12 @@ class Verifier:
         ceiling = TIERS.index(self.max_tier) if self.max_tier in TIERS else 2
 
         if ceiling >= 1:
+            # Policy replay first: it proves a constraint was removed, which is a stronger
+            # statement than "a value changed".
             proof = self._tier1_policy_replay(claim, anomalies)
+            if proof is not None:
+                return proof
+            proof = self._tier1_artifact_replay(claim)
             if proof is not None:
                 return proof
 
@@ -168,3 +173,117 @@ class Verifier:
         if not attached:
             return False, "no policy attached to {} in the pre-change artifact".format(principal)
         return iam.evaluate(principal, action, resource)
+
+
+# --- T1, second strategy: re-parse the artifact and compare effective values --
+def _python_constants(text: str) -> dict:
+    """Module-level literal assignments, by executing the AST rather than the module.
+
+    Parsing instead of importing matters: the artifact under test is a *previous* version of
+    a file, and importing it would run whatever that version contained.
+    """
+    import ast as _ast
+
+    out: dict[str, object] = {}
+    try:
+        tree = _ast.parse(text)
+    except SyntaxError:
+        return out
+    for node in tree.body:
+        if not isinstance(node, _ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, _ast.Name):
+                try:
+                    out[target.id] = _ast.literal_eval(node.value)
+                except (ValueError, SyntaxError):
+                    continue
+    return out
+
+
+def _yaml_values(text: str) -> dict:
+    import yaml as _yaml
+
+    try:
+        doc = _yaml.safe_load(text)
+    except Exception:
+        return {}
+    if isinstance(doc, dict) and isinstance(doc.get("data"), dict):
+        return dict(doc["data"])
+    return doc if isinstance(doc, dict) else {}
+
+
+def _terraform_values(text: str) -> dict:
+    from env.sim.render import parse_iam_terraform
+
+    out = {}
+    for name, policy in parse_iam_terraform(text).items():
+        for s in policy.statements:
+            out["{}/{}".format(name, s.sid or "stmt")] = list(s.resources)
+    return out
+
+
+def _effective_values(path: str, text: str) -> dict:
+    if path.endswith(".py"):
+        return _python_constants(text)
+    if path.endswith((".yaml", ".yml")):
+        return _yaml_values(text)
+    if path.endswith((".tf", ".hcl")):
+        return _terraform_values(text)
+    return {}
+
+
+def _artifact_replay(verifier, claim) -> "Proof | None":
+    """Re-parse each changed artifact before and after, and report what actually changed.
+
+    Spec 5.7 lists "re-parse the config, re-evaluate the policy or flag rule" as T1. The
+    distinction from T0 is not cosmetic: T0 reasons about a diff, while this loads both
+    versions of the artifact and compares the values they *evaluate to*. A diff that looks
+    alarming can leave every effective value identical -- a reformat, a comment, a reordering
+    -- and a diff that looks trivial can change one. Reading the text cannot tell those apart.
+    """
+    for cid in claim.cause_ids:
+        row = verifier.ledger.lookup(cid)
+        if row is None or not row.path:
+            continue
+        ref = row.diff_ref or ""
+        if not ref.startswith("git:"):
+            continue
+        _, repo, sha, path = (ref.split(":", 3) + ["", "", ""])[:4]
+        path = path or row.path
+        before = verifier._file_at(repo, sha + "~", path)
+        after = verifier._file_at(repo, sha, path)
+        if before is None or after is None:
+            continue
+
+        b, a = _effective_values(path, before), _effective_values(path, after)
+        if not b and not a:
+            continue
+
+        changed = {k: (b.get(k), a.get(k)) for k in set(b) | set(a) if b.get(k) != a.get(k)}
+        command = "replay_check(parse={}@{}~ vs @{}: {})".format(
+            repo, sha[:7], sha[:7], path)
+        if changed:
+            detail = "; ".join(
+                "{}: {!r} -> {!r}".format(k, v[0], v[1]) for k, v in sorted(changed.items())
+            )
+            return Proof(
+                tier="T1", passed=True,
+                observed=("Re-parsing the artefact either side of this change gives different "
+                          "effective values: {}. The change is behavioural, not cosmetic."
+                          .format(detail)),
+                expected="the artefact's effective values differ across the change",
+                command=command,
+            )
+        return Proof(
+            tier="T1", passed=False,
+            observed=("Re-parsing the artefact either side of this change gives identical "
+                      "effective values. Whatever the diff shows, this change altered no "
+                      "value the running system reads -- it is unlikely to be the cause."),
+            expected="the artefact's effective values differ across the change",
+            command=command,
+        )
+    return None
+
+
+Verifier._tier1_artifact_replay = lambda self, claim: _artifact_replay(self, claim)

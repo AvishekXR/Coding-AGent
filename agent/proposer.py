@@ -161,7 +161,14 @@ class HeuristicProposer:
         A fully-qualified resource identifier or a configuration key names one thing. A
         hyphenated lowercase token names a category and matches half the repository.
         """
-        return literal.startswith("arn:") or (literal.isupper() and "_" in literal)
+        return (
+            literal.startswith("arn:")
+            or (literal.isupper() and "_" in literal)
+            # A dotted key -- orders.strict_validation, billing.new_pricing. Spec 5.2 lists
+            # feature-flag keys among the literals the index must carry, and a flag key names
+            # exactly one switch.
+            or ("." in literal and literal.islower() and "/" not in literal)
+        )
 
     def _literal_paths(self, anomaly: Anomaly,
                        specific_only: bool = False) -> set[tuple[str, str]]:
@@ -206,6 +213,75 @@ class HeuristicProposer:
             return resolution
         return self._literal_paths(anomaly) | self._dependency_paths(ctx, anomaly.entity)
 
+    def _couples(self, ctx: ProposalContext, change: dict, anomaly: Anomaly) -> bool:
+        """Could this change have produced this anomaly?
+
+        Two ways. First, the change is in the failing service's own repository -- the most
+        ordinary cause of all, and the one the reference incident deliberately lacks, which is
+        how it went missing from the first version of this file. Second, the change touches a
+        file the anomaly's evidence points at, under the precedence rules in `_coupled_paths`.
+        """
+        if change.get("repo") and change["repo"] == anomaly.entity:
+            return True
+        if (change.get("repo"), change.get("path")) in self._coupled_paths(ctx, anomaly):
+            return True
+        if not change.get("repo"):
+            # A change with no repository -- a flag flip, a package upgrade, a console action.
+            # It cannot be matched by file path because it has none, so ask the reverse index
+            # whether anything it *names* appears in the failing service's own code. A flag
+            # key is written down in the code that reads it; a package name is written down in
+            # the image that installs it. This is the only route these changes have, and
+            # without it the whole class is invisible no matter how good the ledger is.
+            return self._names_reach_entity(ctx, change, anomaly.entity)
+        return False
+
+    def _names_reach_entity(self, ctx: ProposalContext, change: dict, entity: str) -> bool:
+        """Does this non-repository change name something that appears in the service's code?
+
+        Only *specific* identifiers count -- a flag key, an ARN, a configuration key. The
+        first version of this accepted any literal, so a console action whose summary read
+        "scaled deployment <svc> from 6 to 8 replicas" coupled to every anomaly on <svc>:
+        the test "does it name something in the service" is trivially satisfied by any change
+        that mentions the service by name, which is most of them. That one console action
+        promptly became the sole named cause of the reference incident.
+
+        Mentioning a service is not evidence about a service. Naming the switch it reads is.
+        """
+        text = " ".join(str(change.get(k) or "") for k in ("path", "summary"))
+        candidates = [l for l in extract_literals(text) if self._is_specific(l)]
+        # The trailing path segment is often the identifier itself (flags/<key>) and may not
+        # survive general tokenisation.
+        tail = str(change.get("path") or "").rsplit("/", 1)[-1]
+        if tail and self._is_specific(tail) and tail not in candidates:
+            candidates.append(tail)
+        # Never let the entity's own name do the work.
+        candidates = [l for l in candidates if l != entity]
+        for lit in sorted(candidates, key=len, reverse=True)[:6]:
+            try:
+                hits = self.tools.who_mentions(lit, limit=40).get("items", [])
+            except Exception:
+                continue
+            if any(m["repo"] == entity for m in hits):
+                return True
+        return False
+
+    def _shares_resource(self, ctx: ProposalContext, a: str, b: str) -> bool:
+        """Do two services name any of the same resources in their configuration?
+
+        A shared table, queue or endpoint is a dependency edge. Derived from observed config
+        rather than declared anywhere, so it stays true when the topology changes.
+        """
+        if a == b:
+            return False
+        try:
+            va = set(str(v) for v in
+                     (self.tools.keys_read_by(a).get("supplied_values") or {}).values())
+            vb = set(str(v) for v in
+                     (self.tools.keys_read_by(b).get("supplied_values") or {}).values())
+        except Exception:
+            return False
+        return bool(va & vb)
+
     def _candidate_changes(self, ctx: ProposalContext, anomaly: Anomaly) -> list[dict]:
         """Admissible changes that could have produced the state this anomaly describes.
 
@@ -224,7 +300,10 @@ class HeuristicProposer:
 
         symptom = parse_ts(ctx.first_symptom_ts)
         admissible = [c for c in changes if parse_ts(c["ts"]) <= symptom]
-        coupled = [c for c in admissible if (c.get("repo"), c.get("path")) in paths]
+        # One predicate for "could this change have caused this anomaly", used both to pick
+        # candidates and to decide what a claim explains. Two predicates that drift apart is
+        # the livelock this file already learned about once.
+        coupled = [c for c in admissible if self._couples(ctx, c, anomaly)]
         # Closest before the symptom first: of two coupled changes, the later one is the
         # more likely proximate cause.
         coupled.sort(key=lambda c: (-(parse_ts(c["ts"]).timestamp()), c["id"]))
@@ -344,12 +423,42 @@ class HeuristicProposer:
         return claims
 
     def _explains_of_change(self, ctx: ProposalContext, change: dict) -> set[str]:
-        """Which residue anomalies this single change could account for."""
-        path = (change.get("repo"), change.get("path"))
-        out: set[str] = set()
-        for a in ctx.residue:
-            if path in self._coupled_paths(ctx, a):
-                out.add(a.id)
+        """Which residue anomalies this single change could account for.
+
+        Direct coupling first, then propagation: an anomaly on a *downstream* service that
+        began at or after an already-explained one, where the two services name a common
+        resource, is accounted for by the same cause. Without this, a consumer whose input
+        dried up looks unexplainable -- it shares no literal with the change that broke its
+        producer -- and the Gate correctly refuses to close on an answer that is actually
+        complete.
+
+        Propagation deliberately never applies to an anomaly that names something specific of
+        its own. That is the precedence rule of D-011 again, and it is what keeps the
+        reference incident honest: the authorization gap names the exact policy clause that
+        permitted the call, so it can only ever be explained by a change to that clause --
+        never by a plausible-looking neighbour arriving at the same moment.
+        """
+        direct = {a.id for a in ctx.residue if self._couples(ctx, change, a)}
+        out = set(direct)
+        by_id = {a.id: a for a in ctx.residue}
+
+        changed = True
+        while changed:
+            changed = False
+            for b in ctx.residue:
+                if b.id in out:
+                    continue
+                if self._literal_paths(b, specific_only=True):
+                    continue  # names something specific; only direct evidence counts
+                for aid in list(out):
+                    a = by_id.get(aid)
+                    if a is None or a.entity == b.entity:
+                        continue
+                    if a.first_seen <= b.first_seen and self._shares_resource(
+                            ctx, a.entity, b.entity):
+                        out.add(b.id)
+                        changed = True
+                        break
         return out
 
     def _standing_still_earns_its_place(self, ctx: ProposalContext, cause_id: str) -> bool:

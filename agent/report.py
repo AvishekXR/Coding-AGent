@@ -406,3 +406,63 @@ def build_unresolved(meta: dict, brief, residue: list[Anomaly], evidence: list[d
                       "would_change_my_mind": cheapest,
                       "cheapest_disambiguating_query": cheapest}
     return pkg
+
+
+# --- class K: nothing is actually wrong --------------------------------------
+def build_no_fault(meta: dict, brief, config=None) -> DecisionPackage:
+    """No anomaly above threshold exists. Spec section 9, class K.
+
+    This is a *finding*, not a failure to find. It needs its own terminal because the
+    Termination Rule cannot express it: T1 demands a human-authored change and there is no
+    change to name, so an honest null incident would otherwise loop until its budget expired
+    and be reported as UNRESOLVED -- which reads as "I could not work it out" when the correct
+    answer is "there is nothing here."
+
+    Getting this wrong is expensive in a specific way. On AIOpsLab only one model reported the
+    no-fault scenario correctly; every other agent invented a fault. An agent that always
+    produces a culprit change will produce one here too, and it will be a real change made by
+    a real person who then spends the night investigating their own innocent commit.
+    """
+    config = config or cfg.DEFAULT
+    sub = [a for a in brief.anomalies if a.severity < Severity.parse(config.min_severity)]
+
+    pkg = DecisionPackage(incident_id=meta["id"], status="no_fault")
+    pkg.mechanism = (
+        "NO FAULT FOUND. No anomaly at or above {} severity exists anywhere in the window "
+        "{} to {}. The alert does not correspond to a measured deviation from this system's "
+        "own baseline. This is a positive finding, not an incomplete investigation: no cause "
+        "is being withheld, because no effect was observed. Check the alert rule and its "
+        "threshold before investigating the system."
+    ).format(config.min_severity, brief.window[0], brief.window[1])
+    pkg.unexplained = [
+        dict(a.to_dict(), note="below the {} threshold; observed but not an incident".format(
+            config.min_severity))
+        for a in sub
+    ]
+    pkg.confidence = {
+        "value": 0.0,
+        "framing": "no cause asserted because no effect was observed",
+        "would_change_my_mind": (
+            "An anomaly above threshold that the causal indexer missed -- most likely a signal "
+            "with no baseline to compare against, or one whose deviation is real but slower "
+            "than the window."
+        ),
+        "cheapest_disambiguating_query": (
+            "Re-run with a lower severity threshold and confirm the sub-threshold anomalies "
+            "listed under `unexplained` are ordinary variation, then review the alert rule "
+            "that fired."
+        ),
+    }
+    pkg.frontier = {
+        "why_unresolved": "no fault found",
+        "ranked_hypotheses": [{
+            "cause_id": None, "rule": "none",
+            "rejected_because": "no anomaly above threshold was observed",
+            "resolves_to_a_recorded_change": False,
+            "summary": "no investigation was started because there is nothing to explain",
+        }],
+        "residue": [a.to_dict() for a in sub],
+        "cheapest_query": pkg.confidence["cheapest_disambiguating_query"],
+        "steps_taken": 0,
+    }
+    return pkg

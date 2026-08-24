@@ -165,6 +165,15 @@ class Runner:
             max_tokens=self.cfg.budget.max_tokens,
         )
 
+        # Class K. Checked before the loop, because a proposer handed an empty residue has
+        # nothing to reason from and will either name nothing (looping on T1) or reach for
+        # the nearest recent change (naming an innocent one). Neither is the right answer.
+        if not significant(brief.anomalies, self.cfg):
+            from agent.report import build_no_fault
+
+            pkg = build_no_fault(meta, brief, self.cfg)
+            return self._finish(run_id, meta, pkg, budget, 0, [], ctx, "no_fault")
+
         evidence: list[dict] = [{"tool": "causal_brief", "args": {},
                                  "result": brief.to_dict()}]
         standing: list[str] = []
