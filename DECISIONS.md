@@ -101,3 +101,18 @@ the thesis failing rather than a timezone bug, on any machine not set to UTC.
 **Choice:** the world's internal clock is naive UTC everywhere. Awareness is added only at the
 boundary with git, via `util.git_ts()`, which every collector and test must use. A test
 (`tests/test_util.py::test_git_window_is_timezone_independent`) pins the behaviour.
+
+---
+
+## D-007 — The reverse index uses ripgrep when present, pure Python otherwise
+**Date:** 2026-08-23
+**Question:** §5.2 specifies "a ripgrep sweep across all checked-out repositories". `rg` is
+not installed on the build machine (`shutil.which("rg")` returns None).
+**Choice:** `ledger/index.py` detects ripgrep and uses it when available; otherwise it runs an
+identical sweep in pure Python with the same output contract, the same regex, and the same
+skip rules. Both paths are exercised by the same tests.
+**Why not just require ripgrep:** the reverse index is load-bearing. Without it the agent
+cannot cross a repository boundary, which makes the entire target incident class (§1.4)
+unsolvable. A hard dependency on an optional binary turns "rg is not installed" into
+"the system cannot solve the problem it was built for", with no useful error. At real
+repository scale ripgrep is much faster and remains the preferred path.
